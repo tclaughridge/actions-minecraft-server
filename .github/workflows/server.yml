@@ -1,0 +1,131 @@
+name: Minecraft Actions Server
+
+on:
+  workflow_dispatch:
+    inputs:
+      run_minutes:
+        description: "How long to keep the server running (max 360)"
+        required: true
+        default: "60"
+
+jobs:
+  mc-server:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: true
+
+      - name: Show runner info (optional)
+        run: |
+          echo "Runner: $(uname -a)"
+          docker version
+
+      - name: Prepare data directory
+        run: |
+          mkdir -p mc-data
+          ls -R
+
+      # ---- PLAYIT TUNNEL (for joining the server) ----
+      - name: Start playit tunnel
+        env:
+          PLAYIT_SECRET: ${{ secrets.PLAYIT_SECRET }}
+        run: |
+          if [ -z "$PLAYIT_SECRET" ]; then
+            echo "PLAYIT_SECRET not set; skipping tunnel (server will be local only)."
+            exit 0
+          fi
+
+          curl -L https://github.com/playit-cloud/playit-agent/releases/latest/download/playit-linux-amd64 -o playit
+          chmod +x playit
+
+          # Run in the background
+          ./playit --secret "$PLAYIT_SECRET" &
+          # Give it a moment to connect and print the connection info
+          sleep 15
+          echo "If successful, playit should have printed the public Minecraft address above."
+
+      # ---- START MINECRAFT CONTAINER ----
+      - name: Start Minecraft server in Docker
+        run: |
+          # Stop any leftover container from a previous run
+          docker rm -f mc 2>/dev/null || true
+
+          docker run -d --name mc \
+            -p 25565:25565 \
+            -e EULA=TRUE \
+            -e TYPE=FABRIC \
+            -e VERSION=1.21.1 \
+            -e MEMORY=8G \
+            -e LEVEL="world-terra-seeded-01" \
+            -e ENABLE_WHITELIST=true \
+            -e WHITELIST="TCL135,jonbonjovi11" \
+            -e OPS="TCL135" \
+            -e MODRINTH_PROJECTS=$'fabric-api\nlithium\nkrypton\nferrite-core\nchunky\ndatapack:terralith' \
+            -e MODRINTH_DOWNLOAD_DEPENDENCIES=required \
+            -v "${GITHUB_WORKSPACE}/mc-data:/data" \
+            itzg/minecraft-server:java21
+
+          echo "Container started. Waiting for initial startup..."
+          # Give the server ~60s to boot before players hammer it
+          sleep 60
+          docker logs mc | tail -n 50
+
+      # ---- CONFIGURE GIT FOR AUTOSAVES ----
+      - name: Configure git user
+        run: |
+          git config user.name "MC Autosave Bot"
+          git config user.email "mc-autosave-bot@users.noreply.github.com"
+
+      # ---- AUTOSAVE LOOP: COMMIT WORLD EVERY MINUTE ----
+      - name: Autosave world to mc-world branch
+        env:
+          RUN_MINUTES: ${{ github.event.inputs.run_minutes }}
+        run: |
+          # Branch where we shove all the server data
+          BRANCH="mc-world"
+
+          # Make sure we start from latest remote state
+          git fetch origin
+          git checkout -B "$BRANCH" origin/"$BRANCH" 2>/dev/null || git checkout -B "$BRANCH"
+
+          end=$(( $(date +%s) + RUN_MINUTES * 60 ))
+
+          while [ $(date +%s) -lt $end ]; do
+            if ! docker ps --format '{{.Names}}' | grep -q '^mc$'; then
+              echo "Minecraft container has stopped; breaking autosave loop."
+              break
+            fi
+
+            echo "=== Autosave at $(date -u +'[%Y-%m-%dT%H:%M:%SZ]') ==="
+
+            # Pull any remote changes just in case
+            git pull --rebase origin "$BRANCH" || true
+
+            # Copy current data into a commit-friendly directory
+            # (so we don't accidentally commit weird temp stuff if you change layout later)
+            rm -rf mc-data-committed
+            mkdir -p mc-data-committed
+            rsync -a --delete mc-data/ mc-data-committed/
+
+            git add mc-data-committed || true
+            git status
+
+            git commit -m "Autosave $(date -u +'%Y-%m-%dT%H:%M:%SZ')" || echo "Nothing to commit this minute."
+            git push origin "$BRANCH"
+
+            sleep 60
+          done
+
+      # ---- CLEANUP ----
+      - name: Stop and remove container
+        if: always()
+        run: |
+          echo "Final logs:"
+          docker logs mc | tail -n 100 || true
+
+          docker stop mc || true
+          docker rm mc || true
