@@ -8,6 +8,9 @@ on:
         required: true
         default: "60"
 
+permissions:
+  contents: write
+
 jobs:
   mc-server:
     runs-on: ubuntu-latest
