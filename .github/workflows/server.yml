@@ -53,6 +53,8 @@ jobs:
 
       # ---- START MINECRAFT CONTAINER ----
       - name: Start Minecraft server in Docker
+        env:
+            RCON_SECRET: ${{ secrets.RCON_SECRET }}
         run: |
           # Stop any leftover container from a previous run
           docker rm -f mc 2>/dev/null || true
@@ -67,6 +69,9 @@ jobs:
             -e ENABLE_WHITELIST=true \
             -e WHITELIST="TCL135,jonbonjovi11" \
             -e OPS="TCL135" \
+            -e ENABLE_RCON=true \
+            -e RCON_PASSWORD="$RCON_SECRET" \
+            -e RCON_PORT=25575 \
             -e MODRINTH_PROJECTS=$'fabric-api\nlithium\nkrypton\nferrite-core\nchunky\ndatapack:terralith' \
             -e MODRINTH_DOWNLOAD_DEPENDENCIES=required \
             -v "${GITHUB_WORKSPACE}/mc-data:/data" \
